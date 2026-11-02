@@ -2,7 +2,7 @@
 
 > Current milestone: Firebase sign-in, online catalog approvals, online orders, staff receiving counts, corrections, workflow status updates, pickup confirmation, and the saved customer notification inbox are implemented. Publish the latest firestore.rules to enable them. See setup/NOTIFICATION_INBOX.md.
 
-# Laundry Management App
+# Susan-Murray-Mobile
 
 First milestone: a local demo built with Expo, React Native, and TypeScript.
 
