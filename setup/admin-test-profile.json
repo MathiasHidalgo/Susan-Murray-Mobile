@@ -1,0 +1,9 @@
+{
+  "documentPath": "users/G5aM2AvMsdhzEaToVu232D1WjQJ3",
+  "fields": {
+    "name": "Admin test",
+    "role": "admin",
+    "profileId": "admin-test-001",
+    "active": true
+  }
+}

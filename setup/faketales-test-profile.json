@@ -1,0 +1,10 @@
+{
+  "documentPath": "users/XynJNe7T4YdgsdVuQahLlqXb3k52",
+  "fields": {
+    "name": "Faketales test",
+    "role": "customer",
+    "profileId": "customer-test-001",
+    "customerId": "test-faketales",
+    "active": true
+  }
+}

@@ -1,0 +1,184 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function profile() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+    function active() {
+      return request.auth != null
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && profile().active == true;
+    }
+    function operations() { return active() && profile().role in ['staff', 'admin']; }
+    function customerFor(id) { return active() && profile().role == 'customer' && profile().customerId == id; }
+    function canonical(value) { return value.lower().replace('[^a-z0-9]', ''); }
+    function validItem(d, id) {
+      return d.customerId is string && d.customerId.matches('^[a-zA-Z0-9-]+$')
+        && d.name is string && d.name.trim().size() > 0 && d.name.size() <= 80
+        && d.type in ['Tablecloth', 'Napkin']
+        && d.fabric is string && d.fabric.size() <= 80 && canonical(d.fabric).size() > 0
+        && d.color is string && d.color.size() <= 40 && canonical(d.color).size() > 0
+        && d.size is string && d.size.size() <= 60 && canonical(d.size).size() > 0
+        && id == d.customerId + '__' + canonical(d.type) + '__' + canonical(d.fabric) + '__' + canonical(d.color) + '__' + canonical(d.size);
+    }
+    function pendingSubmission(d, id) {
+      return d.keys().hasAll(['customerId', 'name', 'type', 'fabric', 'color', 'size', 'status', 'submittedBy', 'submittedAt'])
+        && d.keys().hasOnly(['customerId', 'name', 'type', 'fabric', 'color', 'size', 'status', 'submittedBy', 'submittedAt'])
+        && validItem(d, id) && customerFor(d.customerId)
+        && d.status == 'pending' && d.submittedBy == request.auth.uid && d.submittedAt == request.time;
+    }
+    match /users/{userId} {
+      allow get: if request.auth != null && request.auth.uid == userId;
+      allow list, create, update, delete: if false;
+    }
+    match /catalogRequests/{itemId} {
+      // Prefix access permits transaction reads of a not-yet-created own item.
+      allow get: if operations() || (active() && profile().role == 'customer'
+        && itemId.matches(profile().customerId + '__.*'));
+      allow list: if operations() || customerFor(resource.data.customerId);
+      allow create: if pendingSubmission(request.resource.data, itemId);
+      allow update: if (
+        resource.data.status == 'returned'
+        && request.resource.data.customerId == resource.data.customerId
+        && pendingSubmission(request.resource.data, itemId)
+      ) || (
+        active() && profile().role == 'admin' && resource.data.status == 'pending'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'reviewNote', 'reviewedAt', 'reviewedBy', 'reviewedById'])
+        && request.resource.data.status in ['approved', 'returned']
+        && request.resource.data.reviewNote is string && request.resource.data.reviewNote.size() <= 500
+        && (request.resource.data.status == 'approved' || request.resource.data.reviewNote.trim().size() > 0)
+        && request.resource.data.reviewedBy == profile().name
+        && request.resource.data.reviewedById == request.auth.uid
+        && request.resource.data.reviewedAt == request.time
+      );
+      allow delete: if false;
+    }
+    function validOrderLine(line, id, customerId) {
+      let item = get(/databases/$(database)/documents/catalogRequests/$(id)).data;
+      return line.keys().hasOnly(['catalogItemId', 'item', 'quantity'])
+        && line.catalogItemId == id
+        && line.quantity is int && line.quantity >= 1 && line.quantity <= 999
+        && item.status == 'approved' && item.customerId == customerId
+        && line.item == item.name + ' · ' + item.type + ' · ' + item.fabric + ' · ' + item.color + ' · ' + item.size;
+    }
+    function orderLineAt(d, index) {
+      return d.lines.size() <= index || validOrderLine(d.lines[index], d.lineIds[index], d.customerId);
+    }
+    function validOrder(d, id) {
+      return d.keys().hasAll(['customerId', 'createdBy', 'createdAt', 'step', 'lines', 'lineIds'])
+        && d.keys().hasOnly(['customerId', 'createdBy', 'createdAt', 'step', 'lines', 'lineIds'])
+        && customerFor(d.customerId) && id.matches(d.customerId + '__[a-zA-Z0-9]+')
+        && d.createdBy == request.auth.uid && d.createdAt == request.time && d.step == 0
+        && d.lines is list && d.lines.size() >= 1 && d.lines.size() <= 8
+        && d.lineIds is list && d.lineIds.size() == d.lines.size()
+        && d.lineIds.toSet().size() == d.lineIds.size()
+        && orderLineAt(d, 0) && orderLineAt(d, 1) && orderLineAt(d, 2) && orderLineAt(d, 3)
+        && orderLineAt(d, 4) && orderLineAt(d, 5) && orderLineAt(d, 6) && orderLineAt(d, 7);
+    }
+    function validCountAt(counts, index) {
+      return counts.size() <= index || (counts[index] is int && counts[index] >= 0 && counts[index] <= 999);
+    }
+    function completeCounts(d) {
+      return d.receivedCounts is list && d.receivedCounts.size() == resource.data.lines.size()
+        && validCountAt(d.receivedCounts, 0) && validCountAt(d.receivedCounts, 1)
+        && validCountAt(d.receivedCounts, 2) && validCountAt(d.receivedCounts, 3)
+        && validCountAt(d.receivedCounts, 4) && validCountAt(d.receivedCounts, 5)
+        && validCountAt(d.receivedCounts, 6) && validCountAt(d.receivedCounts, 7);
+    }
+    function submittedCountAt(order, counts, index) {
+      return counts.size() <= index || counts[index] == order.lines[index].quantity;
+    }
+    function countsMatchSubmission(order, counts) {
+      return submittedCountAt(order, counts, 0) && submittedCountAt(order, counts, 1)
+        && submittedCountAt(order, counts, 2) && submittedCountAt(order, counts, 3)
+        && submittedCountAt(order, counts, 4) && submittedCountAt(order, counts, 5)
+        && submittedCountAt(order, counts, 6) && submittedCountAt(order, counts, 7);
+    }
+    function validReceivingUpdate(d, orderId) {
+      let event = getAfter(/databases/$(database)/documents/orders/$(orderId)/countEvents/$(string(d.countRevision))).data;
+      return resource.data.step in [0, 1, 2, 3]
+        && d.diff(resource.data).affectedKeys().hasOnly(['receivedCounts', 'countRevision', 'lastCountAt', 'lastCountById', 'lastCountName', 'step'])
+        && d.countRevision is int && d.countRevision == resource.data.get('countRevision', 0) + 1
+        && completeCounts(d)
+        && d.step == (resource.data.step == 0 ? 1 : resource.data.step)
+        && (resource.data.step == 0 || d.receivedCounts != resource.data.receivedCounts)
+        && d.lastCountAt == request.time && d.lastCountById == request.auth.uid && d.lastCountName == profile().name
+        && event.afterCounts == d.receivedCounts && event.beforeCounts == resource.data.get('receivedCounts', [])
+        && event.recordedAt == request.time && event.actorId == request.auth.uid;
+    }
+    function validCountEvent(d, orderId, eventId) {
+      let before = get(/databases/$(database)/documents/orders/$(orderId)).data;
+      let after = getAfter(/databases/$(database)/documents/orders/$(orderId)).data;
+      return d.keys().hasAll(['revision', 'beforeCounts', 'afterCounts', 'reason', 'actorId', 'actorName', 'recordedAt'])
+        && d.keys().hasOnly(['revision', 'beforeCounts', 'afterCounts', 'reason', 'actorId', 'actorName', 'recordedAt'])
+        && eventId == string(after.countRevision) && d.revision == after.countRevision
+        && after.countRevision == before.get('countRevision', 0) + 1
+        && d.beforeCounts == before.get('receivedCounts', []) && d.afterCounts == after.receivedCounts
+        && d.reason is string && d.reason.size() <= 500
+        && ((before.step == 0 && countsMatchSubmission(before, d.afterCounts)) || d.reason.trim().size() > 0)
+        && d.actorId == request.auth.uid && d.actorName == profile().name && d.recordedAt == request.time;
+    }
+    function validStatusUpdate(d, orderId) {
+      return d.diff(resource.data).affectedKeys().hasOnly(['step', 'statusChangedAt', 'statusChangedById', 'statusChangedBy'])
+        && resource.data.step in [1, 2] && resource.data.get('countRevision', 0) > 0
+        && d.step == resource.data.step + 1 && d.statusChangedAt == request.time
+        && d.statusChangedById == request.auth.uid && d.statusChangedBy == profile().name
+        && (d.step != 3 || readyNoticeExists(orderId, d));
+    }
+    function validPickupUpdate(d, orderId) {
+      return resource.data.step == 3 && resource.data.get('countRevision', 0) > 0
+        && d.diff(resource.data).affectedKeys().hasOnly(['step', 'pickedUpAt', 'pickedUpById', 'pickedUpBy'])
+        && d.step == 4 && d.pickedUpAt == request.time
+        && d.pickedUpById == request.auth.uid && d.pickedUpBy == profile().name
+        && pickupNoticeExists(orderId, d);
+    }
+    match /orders/{orderId} {
+      allow get: if operations() || (active() && profile().role == 'customer'
+        && orderId.matches(profile().customerId + '__[a-zA-Z0-9]+'));
+      allow list: if operations() || customerFor(resource.data.customerId);
+      allow create: if validOrder(request.resource.data, orderId);
+      allow update: if operations() && (validReceivingUpdate(request.resource.data, orderId) || validStatusUpdate(request.resource.data, orderId) || validPickupUpdate(request.resource.data, orderId));
+      allow delete: if false;
+      match /countEvents/{eventId} {
+        allow read: if operations() || customerFor(get(/databases/$(database)/documents/orders/$(orderId)).data.customerId);
+        allow create: if operations() && validCountEvent(request.resource.data, orderId, eventId);
+        allow update, delete: if false;
+      }
+    }
+    function readyNoticeExists(orderId, order) {
+      let notice = getAfter(/databases/$(database)/documents/notifications/$(orderId + '__ready')).data;
+      return notice.orderId == orderId && notice.customerId == order.customerId
+        && notice.type == 'order_ready' && notice.createdAt == request.time && notice.createdBy == request.auth.uid;
+    }
+    function pickupNoticeExists(orderId, order) {
+      let notice = getAfter(/databases/$(database)/documents/notifications/$(orderId + '__pickedup')).data;
+      return notice.orderId == orderId && notice.customerId == order.customerId
+        && notice.type == 'order_picked_up' && notice.createdAt == request.time && notice.createdBy == request.auth.uid;
+    }
+    function validOrderNotice(d, noticeId) {
+      let before = get(/databases/$(database)/documents/orders/$(d.orderId)).data;
+      let after = getAfter(/databases/$(database)/documents/orders/$(d.orderId)).data;
+      return d.keys().hasAll(['orderId', 'customerId', 'type', 'createdAt', 'createdBy', 'readBy'])
+        && d.keys().hasOnly(['orderId', 'customerId', 'type', 'createdAt', 'createdBy', 'readBy'])
+        && d.customerId == after.customerId
+        && d.createdAt == request.time && d.createdBy == request.auth.uid
+        && d.readBy is map && d.readBy.size() == 0
+        && ((d.type == 'order_ready' && noticeId == d.orderId + '__ready'
+          && before.step == 2 && after.step == 3 && after.statusChangedAt == request.time)
+        || (d.type == 'order_picked_up' && noticeId == d.orderId + '__pickedup'
+          && before.step == 3 && after.step == 4 && after.pickedUpAt == request.time));
+    }
+    match /notifications/{noticeId} {
+      allow read: if operations() || customerFor(resource.data.customerId);
+      allow create: if operations() && validOrderNotice(request.resource.data, noticeId);
+      allow update: if customerFor(resource.data.customerId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readBy'])
+        && request.resource.data.readBy is map
+        && request.resource.data.readBy.diff(resource.data.readBy).affectedKeys().hasOnly([request.auth.uid])
+        && resource.data.readBy.get(request.auth.uid, null) == null
+        && request.resource.data.readBy[request.auth.uid] == request.time;
+      allow delete: if false;
+    }
+    match /{document=**} { allow read, write: if false; }
+  }
+}
